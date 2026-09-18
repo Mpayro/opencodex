@@ -71,7 +71,14 @@ const WARMUP_ENTRY_POINTS: ReadonlySet<string> = new Set(["warmColdSpawn", "warm
 /** The bun:test hook a warm-up belongs in, so the cost lands in setup and not in an assertion. */
 const REGISTRATION_HOOK = "beforeAll";
 
-type Token = Readonly<{ kind: SyntaxKind; text: string; value: string; start: number }>;
+type Token = Readonly<{
+  kind: SyntaxKind;
+  text: string;
+  value: string;
+  start: number;
+  /** Whether trivia before this token held a line break, which is where a statement can end. */
+  newline: boolean;
+}>;
 
 export type WarmupRegistration = Readonly<{
   /** The helper entry point the hook waits for. */
@@ -183,6 +190,43 @@ const CONDITIONAL_TOKENS: ReadonlySet<SyntaxKind> = new Set([
 ]);
 
 /**
+ * Conditionals with a parenthesized head. Their closing paren can end a statement, so the token
+ * after it needs an exemption from the line-break rule below: it begins the guarded statement
+ * rather than a new one.
+ */
+const HEADED_CONDITIONALS: ReadonlySet<SyntaxKind> = new Set([
+  SyntaxKind.IfKeyword,
+  SyntaxKind.ForKeyword,
+  SyntaxKind.WhileKeyword,
+  SyntaxKind.SwitchKeyword,
+]);
+
+/**
+ * Tokens a statement can end on. This repository writes its semicolons, but the judge cannot
+ * assume that: with no automatic semicolon insertion, one semicolonless guarded statement would
+ * leave the conditional flag set and refuse the next, unconditional registration after it.
+ */
+const CAN_END_STATEMENT: ReadonlySet<SyntaxKind> = new Set([
+  SyntaxKind.Identifier,
+  SyntaxKind.PrivateIdentifier,
+  SyntaxKind.CloseParenToken,
+  SyntaxKind.CloseBracketToken,
+  SyntaxKind.CloseBraceToken,
+  SyntaxKind.StringLiteral,
+  SyntaxKind.NumericLiteral,
+  SyntaxKind.BigIntLiteral,
+  SyntaxKind.NoSubstitutionTemplateLiteral,
+  SyntaxKind.TemplateTail,
+  SyntaxKind.RegularExpressionLiteral,
+  SyntaxKind.TrueKeyword,
+  SyntaxKind.FalseKeyword,
+  SyntaxKind.NullKeyword,
+  SyntaxKind.ThisKeyword,
+  SyntaxKind.PlusPlusToken,
+  SyntaxKind.MinusMinusToken,
+]);
+
+/**
  * The only call a registration may sit inside. A hook registered in an uncalled helper function,
  * in a test body, or in an immediately-invoked function is not a hook the file is known to run, and
  * bun:test registers per describe scope, so describe is the whole allowed set.
@@ -253,6 +297,10 @@ export function analyzeWarmupRegistration(fileName: string, source: string): War
   const callStack: string[] = [];
   const frames: { owner: string; conditional: boolean; parenDepth: number }[] = [];
   let statementConditional = false;
+  // The token that begins a guarded statement: the one place where a line break after a closing
+  // paren continues the statement rather than ending it.
+  let consequentStart = -1;
+  let awaitingConsequent = false;
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
     if (token.kind === SyntaxKind.CloseParenToken) callStack.pop();
@@ -264,7 +312,19 @@ export function analyzeWarmupRegistration(fileName: string, source: string): War
     // describe sits one paren deep, so a file-level test would never see a condition in there.
     const frame = frames[frames.length - 1];
     const atStatementLevel = callStack.length === (frame === undefined ? 0 : frame.parenDepth);
-    if (atStatementLevel && CONDITIONAL_TOKENS.has(token.kind)) statementConditional = true;
+    const previousToken = tokens[i - 1];
+    if (atStatementLevel && token.newline && i !== consequentStart
+      && previousToken !== undefined && CAN_END_STATEMENT.has(previousToken.kind)) {
+      statementConditional = false;
+    }
+    if (atStatementLevel && awaitingConsequent && token.kind === SyntaxKind.CloseParenToken) {
+      awaitingConsequent = false;
+      consequentStart = i + 1;
+    }
+    if (atStatementLevel && CONDITIONAL_TOKENS.has(token.kind)) {
+      statementConditional = true;
+      if (HEADED_CONDITIONALS.has(token.kind)) awaitingConsequent = true;
+    }
     if (atStatementLevel && token.kind === SyntaxKind.SemicolonToken) statementConditional = false;
     if (token.kind === SyntaxKind.OpenBraceToken) {
       frames.push({
@@ -406,6 +466,7 @@ function tokenize(source: string): { tokens: Token[]; unreadable: string[] } {
     if (kind === SyntaxKind.EndOfFile) break;
     let start = scanner.getTokenStart();
     let text = scanner.getTokenText();
+    const newline = scanner.hasPrecedingLineBreak();
     if (kind === SyntaxKind.SlashToken || kind === SyntaxKind.SlashEqualsToken) {
       const afterSlash = scanner.getTokenEnd();
       const previous = tokens[tokens.length - 1];
@@ -442,7 +503,7 @@ function tokenize(source: string): { tokens: Token[]; unreadable: string[] } {
       unreadable.push(at(source, start) + "a closing delimiter with nothing open, so this judge is reading the file wrong");
       return { tokens, unreadable };
     }
-    tokens.push({ kind, text, value: value ?? "", start });
+    tokens.push({ kind, text, value: value ?? "", start, newline });
   }
   if (braces !== 0 || parens !== 0 || brackets !== 0 || templates.length > 0) {
     unreadable.push("the file does not close every delimiter this judge opened (braces " + braces

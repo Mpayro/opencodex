@@ -206,6 +206,22 @@ describe("warm-up judge: the hook registration", () => {
     );
     expect(warmupIsRegistered(inner)).toBe(false);
   });
+
+  test("a semicolonless guarded hook does not poison the registration after it", () => {
+    // The guarded one is refused and the plain one is not. Without a statement boundary that does
+    // not need a semicolon, the condition would still be set on the next line, and a file whose
+    // style omits semicolons would lose a warm-up it really has.
+    const report = judge(
+      BUN_TEST,
+      HELPER,
+      "if (false) beforeAll(() => warmModuleGraph(options))",
+      "beforeAll(async () => {",
+      "  await warmModuleGraph(options);",
+      "}, COLD_SPAWN_WARMUP_HOOK_BUDGET_MS);",
+    );
+    expect(warmupIsRegistered(report)).toBe(true);
+    expect(warmupRegistrationComplaints(report).join(" ")).toContain("cannot see it run");
+  });
 });
 
 describe("warm-up judge: call ownership", () => {
