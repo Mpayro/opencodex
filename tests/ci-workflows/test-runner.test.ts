@@ -1064,12 +1064,18 @@ describe("bun test user lock", () => {
 
   // Windows-only, and deliberately no longer gated on the no-queue opt-out. The hosted
   // batch leg sets OCX_TEST_NO_QUEUE=1 for its own six-file processes, which skipped this
-  // case on the only platform it covers (#4991). The controller below owns a lock of its
-  // own rather than borrowing the lane's, so the regression now runs under either setting.
+  // case on the only platform it covers (#4991). The controller below holds a lock in its
+  // own right rather than borrowing the lane's, so the regression now runs either way.
+  //
+  // Two deadlines, not one. The controller is told to finish 10s before the hard kill so
+  // it always reaches its own teardown — releasing the lock and confirming its children
+  // were reaped — instead of being terminated inside a spawn with the lock still held.
+  // The spawnSync timeout stays the backstop for a controller that ignores its deadline.
   test.if(process.platform === "win32")(
-    "a nested Windows Bun test inherits an independently owned live lock and refuses an incomplete capability",
+    "a nested Windows Bun test inherits the live lock its controller holds and refuses an incomplete capability",
     () => {
       const root = mkdtempSync(join(tmpdir(), "opencodex-nested-lock-"));
+      const controllerBudgetMs = SPAWN_BUDGET_MS - 10_000;
       const environmentBefore = JSON.stringify({
         noQueue: process.env[TEST_RUN_NO_QUEUE_ENV],
         runId: process.env[TEST_RUN_ID_ENV],
@@ -1079,12 +1085,16 @@ describe("bun test user lock", () => {
       });
       try {
         // Only the controller's copy loses the opt-out, and its cwd stays outside the
-        // repository so Bun loads no bunfig preload into the lock owner itself.
+        // repository so Bun loads no bunfig preload into the lock holder itself.
         const controllerEnv = { ...process.env };
         delete controllerEnv[TEST_RUN_NO_QUEUE_ENV];
         const controller = spawnSync(
           process.execPath,
-          [helperPath("nested-test-run-lock-controller.ts"), root],
+          [
+            helperPath("nested-test-run-lock-controller.ts"),
+            root,
+            String(Date.now() + controllerBudgetMs),
+          ],
           { cwd: root, env: controllerEnv, encoding: "utf8", timeout: SPAWN_BUDGET_MS },
         );
         const prefix = '{"' + NESTED_LIVE_LOCK_RECEIPT_KEY + '":';
@@ -1095,7 +1105,7 @@ describe("bun test user lock", () => {
         // Booleans and redacted controller notes only; raw child output never surfaces here.
         expect(payload?.diagnostics ?? ["the controller printed no receipt"]).toEqual([]);
         expect(payload?.nestedLiveLockReceipt).toEqual({
-          lockOwned: true,
+          lockHeld: true,
           healthyChildExited: true,
           healthyReceiptComplete: true,
           missingTokenRefused: true,
