@@ -128,6 +128,29 @@ function clientThreadAnchor(parsed: OcxParsedRequest): string | undefined {
   return undefined;
 }
 
+/**
+ * Which class of anchor {@link antigravitySessionId} derives this request's session id from.
+ *
+ * The id itself identifies a live conversation and is a Google-visible wire value, so it is not
+ * something a user can paste into a public bug report. The class is: it distinguishes the four
+ * stability regimes above — a Codex parent/child pair, a parent-only client, the content-derived
+ * text anchor that compaction can move, and the random fallback that changes every turn — while
+ * carrying no identity at all.
+ *
+ * Deliberately a separate read rather than a return value of the id function: nothing about the
+ * session id changes because a diagnostic wants to describe it. The correspondence between the
+ * two is pinned behaviourally by tests rather than by sharing a branch.
+ */
+export type AntigravitySessionAnchor = "parent-and-own" | "parent-only" | "text" | "none";
+
+export function antigravitySessionAnchor(parsed: OcxParsedRequest): AntigravitySessionAnchor {
+  const own = parsed._codexOwnThreadId?.trim();
+  const parent = parsed._clientThreadId?.trim();
+  if (own && parent) return "parent-and-own";
+  if (parent) return "parent-only";
+  return firstUserText(parsed) ? "text" : "none";
+}
+
 /** A Gemini content part as it appears in an Antigravity request body. */
 interface GeminiPart {
   thought?: boolean;

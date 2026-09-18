@@ -1,5 +1,6 @@
 import type { AdapterFetchContext, AdapterRequest, ProviderAdapter } from "./base";
-import { debugDroppedFrame } from "../lib/debug";
+import { debugDroppedFrame, debugProviderDiagnostic } from "../lib/debug";
+import { isDebugEnabled } from "../lib/debug-settings";
 import { createToolCallIdAllocator } from "./tool-call-id";
 import { createImageBudget, materializeInlineImage, MAX_ENCODED_BYTES_PER_IMAGE, artifactHttpUrl } from "../images/artifacts";
 import type {
@@ -20,7 +21,8 @@ import { getVertexAccessToken } from "../lib/gcp-adc";
 import { fetchAntigravityWithRetry, fetchVertexWithRetry } from "./google-http";
 import { safeAntigravityHttpErrorMessage, safeVertexHttpErrorMessage } from "./google-errors";
 import { isVertexTruncatedTurn, vertexTruncationErrorMessage } from "./google-truncation";
-import { ANTIGRAVITY_REQUEST_UA, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
+import { ANTIGRAVITY_REQUEST_UA, antigravitySessionAnchor, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
+import { summarizeGoogleWireShape } from "./google-wire-shape";
 import { compileGoogleWireBody } from "./google-wire-compiler";
 import { identifyRoutedModel } from "./identity";
 import {
@@ -988,6 +990,19 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           // The model-tail "(continue)" guard runs once, in messagesToGeminiFormat, so CCA,
           // Vertex and AI Studio share one decision. A second check here would append a
           // duplicate nudge whenever signature sanitization reshapes the tail afterwards.
+        }
+        // Opt-in structural description of the request that is about to leave (#5008). The
+        // gate is here rather than inside the logger because the projection walks every turn,
+        // and a 440-message session should cost nothing while provider debug is off. It reads
+        // `request` and writes nothing back, so the bytes below are the same either way.
+        if (isDebugEnabled()) {
+          debugProviderDiagnostic("google", "antigravity-wire-shape", summarizeGoogleWireShape(request, {
+            sessionAnchor: antigravitySessionAnchor(parsed),
+            // A replayed call is one whose signature came from client history or the durable
+            // store; the Antigravity session cache signs later, inside applyAntigravityReplay.
+            signatureLookupHit: replayedCallIds.length > 0,
+            signatureScopeMatched: parsed._reasoningReplayScope !== undefined,
+          }));
         }
         const envelope = {
           model: wireModelId,
