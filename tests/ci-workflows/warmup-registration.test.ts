@@ -117,6 +117,9 @@ describe("warm-up judge: the import binding", () => {
     );
     expect(warmupIsRegistered(report)).toBe(false);
     expect(warmupRegistrationComplaints(report).join(" ")).toContain("namespace");
+    // The unwarmed disposition is guarded by this flag rather than by the bindings, which a
+    // namespace import leaves empty while really warming.
+    expect(report.importsHelperModule).toBe(true);
   });
 });
 
@@ -163,6 +166,46 @@ describe("warm-up judge: the hook registration", () => {
       ...hook("await warmModuleGraph(options);"),
     )).toBe(false);
   });
+
+  test("a registration the file never reaches is not a registration", () => {
+    // Both shapes call beforeAll with a correct, awaited warm-up, and neither runs: one sits in a
+    // helper nobody calls, the other behind a condition that is false. A hook that never registers
+    // leaves the measured child paying the cold load, which is the defect wearing the right shape.
+    const uncalled = judge(
+      BUN_TEST,
+      HELPER,
+      "function installWarmUp() {",
+      "  beforeAll(async () => {",
+      "    await warmModuleGraph(options);",
+      "  }, COLD_SPAWN_WARMUP_HOOK_BUDGET_MS);",
+      "}",
+    );
+    const guarded = judge(
+      BUN_TEST,
+      HELPER,
+      "if (false) {",
+      "  beforeAll(async () => {",
+      "    await warmModuleGraph(options);",
+      "  }, COLD_SPAWN_WARMUP_HOOK_BUDGET_MS);",
+      "}",
+    );
+    expect([warmupIsRegistered(uncalled), warmupIsRegistered(guarded)]).toEqual([false, false]);
+    expect(warmupRegistrationComplaints(uncalled).join(" ")).toContain("cannot see it run");
+    // The third is the same hole one level in: a helper declared inside the describe still reads
+    // as a describe scope by paren depth alone, and still nobody calls it.
+    const inner = judge(
+      BUN_TEST,
+      HELPER,
+      'describe("subject", () => {',
+      "  const installWarmUp = () => {",
+      "    beforeAll(async () => {",
+      "      await warmModuleGraph(options);",
+      "    }, COLD_SPAWN_WARMUP_HOOK_BUDGET_MS);",
+      "  };",
+      "});",
+    );
+    expect(warmupIsRegistered(inner)).toBe(false);
+  });
 });
 
 describe("warm-up judge: call ownership", () => {
@@ -191,6 +234,22 @@ describe("warm-up judge: call ownership", () => {
     expect(warmupIsRegistered(report)).toBe(false);
     expect(warmupRegistrationComplaints(report).join(" ")).toContain("redeclared");
   });
+
+  test("a callback parameter of the same name shadows the import for the whole body", () => {
+    // Out of reach of the redeclaration scan: a parameter is bound by the parameter list, with no
+    // declaration keyword in front of it to find.
+    const report = judge(
+      BUN_TEST,
+      HELPER,
+      'describe("subject", () => {',
+      "  beforeAll(async (warmModuleGraph) => {",
+      "    await warmModuleGraph(options);",
+      "  }, COLD_SPAWN_WARMUP_HOOK_BUDGET_MS);",
+      "});",
+    );
+    expect(warmupIsRegistered(report)).toBe(false);
+    expect(warmupRegistrationComplaints(report).join(" ")).toContain("parameter");
+  });
 });
 
 describe("warm-up judge: completion", () => {
@@ -218,6 +277,19 @@ describe("warm-up judge: completion", () => {
       "  await warmModuleGraph(options);",
       "}, COLD_SPAWN_WARMUP_HOOK_BUDGET_MS);",
     )).toBe(true);
+  });
+
+  test("a warm-up that is only part of the returned expression does not settle the hook", () => {
+    // Both return something other than the warm-up promise: the right operand of &&, and the right
+    // side of a comma expression. The hook settles on that instead, while the warm-up runs on.
+    const operand = judge(
+      BUN_TEST,
+      HELPER,
+      "beforeAll(() => warmModuleGraph(options) && ready(), COLD_SPAWN_WARMUP_HOOK_BUDGET_MS);",
+    );
+    const sequence = judge(BUN_TEST, HELPER, ...hook("return warmModuleGraph(options), ready();"));
+    expect([warmupIsRegistered(operand), warmupIsRegistered(sequence)]).toEqual([false, false]);
+    expect(warmupRegistrationComplaints(operand).join(" ")).toContain("larger returned expression");
   });
 });
 

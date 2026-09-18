@@ -22,17 +22,21 @@ import { helperPath } from "./repo-root";
  * string bind nothing, and a type-only import loads nothing at run time.
  *
  * hook registration - a bun:test beforeAll binding is called with an inline callback, at the top
- * level or inside a describe. A callback that is only declared registers nothing.
+ * level or inside a describe, unconditionally. A callback that is only declared registers nothing,
+ * and neither does a hook sitting in a helper function nobody calls or behind a false condition.
  *
  * call ownership - the bound name is called on that callback's own direct path: not inside a nested
- * function, not behind a condition, and not through a name the file redeclares.
+ * function, not behind a condition, and not through a name the file redeclares or the callback
+ * takes as a parameter.
  *
  * completion - the returned promise reaches the hook through await or return. Fire-and-forget and
  * void both leave the hook finishing before the warm-up does, which is the same measured cold start
- * with extra steps.
+ * with extra steps, and a warm-up that is only one operand of the returned expression settles the
+ * hook on something else.
  *
- * unwarmed exception - a file recorded as unwarmed must bind nothing from the helper, so a real
- * warm-up cannot hide behind a false disposition.
+ * unwarmed exception - a file recorded as unwarmed must not import the helper at all, not merely
+ * bind nothing from it, so a namespace import cannot hide a real warm-up behind a false
+ * disposition.
  *
  * ## What this cannot decide
  *
@@ -83,6 +87,12 @@ export type WarmupRegistration = Readonly<{
 export type WarmupRegistrationReport = Readonly<{
   /** Local names a runtime import bound to a warm-up entry point. */
   bindings: readonly string[];
+  /**
+   * Whether the file imports the helper module at all, whatever it binds. A file recorded as
+   * unwarmed needs this false: a namespace import binds no name this judge follows, so bindings
+   * alone would report a real warm-up as an absence.
+   */
+  importsHelperModule: boolean;
   /** Registrations that survived every stage. */
   registrations: readonly WarmupRegistration[];
   /** Near misses, named with the stage that refused them and the line they sit on. */
@@ -172,18 +182,27 @@ const CONDITIONAL_TOKENS: ReadonlySet<SyntaxKind> = new Set([
   SyntaxKind.QuestionQuestionToken,
 ]);
 
+/**
+ * The only call a registration may sit inside. A hook registered in an uncalled helper function,
+ * in a test body, or in an immediately-invoked function is not a hook the file is known to run, and
+ * bun:test registers per describe scope, so describe is the whole allowed set.
+ */
+const REGISTRATION_SCOPE = "describe";
+
 export function analyzeWarmupRegistration(fileName: string, source: string): WarmupRegistrationReport {
   const scan = tokenize(source);
   const rejected: string[] = [];
   if (scan.unreadable.length > 0) {
-    return { bindings: [], registrations: [], rejected, unreadable: scan.unreadable };
+    return { bindings: [], importsHelperModule: false, registrations: [], rejected, unreadable: scan.unreadable };
   }
   const tokens = scan.tokens;
   const clauses = importClauses(tokens);
 
   const bindings = new Map<string, string>();
+  let importsHelperModule = false;
   for (const clause of clauses) {
     if (!importsTheWarmupHelper(fileName, clause.specifier)) continue;
+    importsHelperModule = true;
     if (clause.namespace !== undefined) {
       rejected.push(at(source, clause.start) + "the warm-up helper is imported as a namespace (* as "
         + clause.namespace + "), a shape this judge does not follow; teach it that form before using it");
@@ -210,7 +229,7 @@ export function analyzeWarmupRegistration(fileName: string, source: string): War
     if (rejected.length === 0) {
       rejected.push("no runtime import binds warmColdSpawn or warmModuleGraph from tests/helpers/cold-spawn-warmup");
     }
-    return { bindings: [], registrations: [], rejected, unreadable: [] };
+    return { bindings: [], importsHelperModule, registrations: [], rejected, unreadable: [] };
   }
 
   const hooks = new Set<string>();
@@ -222,16 +241,51 @@ export function analyzeWarmupRegistration(fileName: string, source: string): War
   }
   if (hooks.size === 0) {
     rejected.push(REGISTRATION_HOOK + " is not imported from bun:test, so nothing registers the warm-up");
-    return { bindings: [...bindings.keys()], registrations: [], rejected, unreadable: [] };
+    return { bindings: [...bindings.keys()], importsHelperModule, registrations: [], rejected, unreadable: [] };
   }
 
   const registrations: WarmupRegistration[] = [];
+  // One pass carrying the context a registration has to sit in. The call stack is every open call
+  // by paren depth, the frames are every open block with the call that owns it, and the statement
+  // flag is a condition seen at statement level since the last statement boundary. Without them
+  // the scan would accept a hook registered inside if (false), or inside a helper function nobody
+  // calls, which registers nothing and reads exactly like a hook that does.
+  const callStack: string[] = [];
+  const frames: { owner: string; conditional: boolean; parenDepth: number }[] = [];
+  let statementConditional = false;
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
+    if (token.kind === SyntaxKind.CloseParenToken) callStack.pop();
+    if (token.kind === SyntaxKind.CloseBraceToken) {
+      frames.pop();
+      statementConditional = false;
+    }
+    // Statement level is relative to the block we are in, not to the file: everything inside a
+    // describe sits one paren deep, so a file-level test would never see a condition in there.
+    const frame = frames[frames.length - 1];
+    const atStatementLevel = callStack.length === (frame === undefined ? 0 : frame.parenDepth);
+    if (atStatementLevel && CONDITIONAL_TOKENS.has(token.kind)) statementConditional = true;
+    if (atStatementLevel && token.kind === SyntaxKind.SemicolonToken) statementConditional = false;
+    if (token.kind === SyntaxKind.OpenBraceToken) {
+      frames.push({
+        owner: opensArgumentCallback(tokens, i) ? callStack[callStack.length - 1] ?? "" : "",
+        conditional: statementConditional || (frame?.conditional ?? false),
+        parenDepth: callStack.length,
+      });
+      statementConditional = false;
+    }
+    if (token.kind === SyntaxKind.OpenParenToken) callStack.push(calleeBefore(tokens, i));
     if (token.kind !== SyntaxKind.Identifier || !hooks.has(token.text)) continue;
     const before = tokens[i - 1];
     if (before !== undefined && (before.kind === SyntaxKind.DotToken || before.kind === SyntaxKind.QuestionDotToken)) continue;
     if (tokens[i + 1] === undefined || tokens[i + 1].kind !== SyntaxKind.OpenParenToken) continue;
+    const foreignScope = frames.find(entry => entry.owner !== REGISTRATION_SCOPE);
+    if (statementConditional || frames.some(entry => entry.conditional) || foreignScope !== undefined) {
+      rejected.push(at(source, token.start) + token.text
+        + " is registered where the judge cannot see it run: a registration belongs at the top level"
+        + " or in a describe, unconditionally");
+      continue;
+    }
     const body = callbackBody(tokens, i + 2);
     if (body === undefined) {
       rejected.push(at(source, token.start) + token.text
@@ -253,7 +307,63 @@ export function analyzeWarmupRegistration(fileName: string, source: string): War
   if (registrations.length === 0 && rejected.length === 0) {
     rejected.push("the warm-up helper is imported but never awaited inside a " + REGISTRATION_HOOK + " callback");
   }
-  return { bindings: [...bindings.keys()], registrations, rejected, unreadable: [] };
+  return { bindings: [...bindings.keys()], importsHelperModule, registrations, rejected, unreadable: [] };
+}
+
+/**
+ * The name of the call an open paren belongs to, following a member chain back to its root so
+ * describe.only counts as describe. An empty string when the paren opens something that is not a
+ * plain call, which is a scope this judge refuses rather than guesses at.
+ */
+function calleeBefore(tokens: readonly Token[], open: number): string {
+  let k = open - 1;
+  if (tokens[k] === undefined || tokens[k].kind !== SyntaxKind.Identifier) return "";
+  let root = tokens[k].text;
+  while (tokens[k - 1] !== undefined && tokens[k - 1].kind === SyntaxKind.DotToken
+    && tokens[k - 2] !== undefined && tokens[k - 2].kind === SyntaxKind.Identifier) {
+    k -= 2;
+    root = tokens[k].text;
+  }
+  return root;
+}
+
+/**
+ * Whether a block brace opens a callback passed as an argument, which is what a describe body is.
+ * The same brace shape opens a helper function nobody calls, and the difference is only what comes
+ * before the arrow: an argument starts right after the call paren or a comma, while a declared
+ * function starts after an equals sign or a name.
+ */
+function opensArgumentCallback(tokens: readonly Token[], brace: number): boolean {
+  let k = brace - 1;
+  if (tokens[k] === undefined || tokens[k].kind !== SyntaxKind.EqualsGreaterThanToken) return false;
+  k -= 1;
+  if (tokens[k] === undefined) return false;
+  if (tokens[k].kind === SyntaxKind.CloseParenToken) {
+    const open = openingParen(tokens, k);
+    if (open === undefined) return false;
+    k = open - 1;
+  } else if (tokens[k].kind === SyntaxKind.Identifier) {
+    k -= 1;
+  } else {
+    return false;
+  }
+  if (tokens[k] !== undefined && tokens[k].kind === SyntaxKind.AsyncKeyword) k -= 1;
+  const before = tokens[k];
+  return before !== undefined
+    && (before.kind === SyntaxKind.OpenParenToken || before.kind === SyntaxKind.CommaToken);
+}
+
+/** The paren that opens the group closing at close, scanning backwards. */
+function openingParen(tokens: readonly Token[], close: number): number | undefined {
+  let depth = 0;
+  for (let i = close; i >= 0; i -= 1) {
+    if (CLOSERS.has(tokens[i].kind)) depth += 1;
+    else if (OPENERS.has(tokens[i].kind)) {
+      depth -= 1;
+      if (depth === 0) return tokens[i].kind === SyntaxKind.OpenParenToken ? i : undefined;
+    }
+  }
+  return undefined;
 }
 
 /** The module a binding has to come from. A same-named export of another file is not this one. */
@@ -437,7 +547,13 @@ function redeclarationOf(tokens: readonly Token[], name: string): Token | undefi
   return undefined;
 }
 
-type CallbackBody = Readonly<{ start: number; end: number; expression: boolean }>;
+type CallbackBody = Readonly<{
+  start: number;
+  end: number;
+  expression: boolean;
+  /** Names the callback binds itself. A parameter shadows the import for the whole body. */
+  parameters: readonly string[];
+}>;
 
 /**
  * The body of the inline callback a hook is given, or undefined when the first argument is not one.
@@ -458,15 +574,19 @@ function callbackBody(tokens: readonly Token[], from: number): CallbackBody | un
     const brace = skipReturnType(tokens, close + 1);
     if (tokens[brace] === undefined || tokens[brace].kind !== SyntaxKind.OpenBraceToken) return undefined;
     const end = matching(tokens, brace);
-    return end === undefined ? undefined : { start: brace + 1, end, expression: false };
+    return end === undefined ? undefined
+      : { start: brace + 1, end, expression: false, parameters: identifiersBetween(tokens, p, close) };
   }
   let arrow: number | undefined;
+  let parameters: readonly string[] = [];
   if (head.kind === SyntaxKind.OpenParenToken) {
     const close = matching(tokens, k);
     if (close === undefined) return undefined;
+    parameters = identifiersBetween(tokens, k, close);
     arrow = skipReturnType(tokens, close + 1);
   } else if (head.kind === SyntaxKind.Identifier && tokens[k + 1] !== undefined
     && tokens[k + 1].kind === SyntaxKind.EqualsGreaterThanToken) {
+    parameters = [head.text];
     arrow = k + 1;
   }
   if (arrow === undefined || tokens[arrow] === undefined
@@ -475,9 +595,19 @@ function callbackBody(tokens: readonly Token[], from: number): CallbackBody | un
   if (tokens[bodyStart] === undefined) return undefined;
   if (tokens[bodyStart].kind === SyntaxKind.OpenBraceToken) {
     const end = matching(tokens, bodyStart);
-    return end === undefined ? undefined : { start: bodyStart + 1, end, expression: false };
+    return end === undefined ? undefined
+      : { start: bodyStart + 1, end, expression: false, parameters };
   }
-  return { start: bodyStart, end: argumentEnd(tokens, bodyStart), expression: true };
+  return { start: bodyStart, end: argumentEnd(tokens, bodyStart), expression: true, parameters };
+}
+
+/** Every identifier inside a delimiter pair, which for a parameter list over-collects on purpose. */
+function identifiersBetween(tokens: readonly Token[], open: number, close: number): string[] {
+  const names: string[] = [];
+  for (let i = open + 1; i < close; i += 1) {
+    if (tokens[i].kind === SyntaxKind.Identifier) names.push(tokens[i].text);
+  }
+  return names;
 }
 
 /** Walk past a return-type annotation to the arrow or body brace that follows it. */
@@ -520,6 +650,16 @@ function warmupCallIn(
     const helper = call === undefined ? undefined : bindings.get(call.text);
     if (call !== undefined && helper !== undefined && call.kind === SyntaxKind.Identifier
       && tokens[k + 1] !== undefined && tokens[k + 1].kind === SyntaxKind.OpenParenToken) {
+      if (body.parameters.includes(call.text)) {
+        return { found: undefined, reasons: [shadowedByParameter(source, call)] };
+      }
+      // The hook returns the WHOLE expression. A warm-up that is only its left operand leaves the
+      // hook settling on something else, so the call has to be all there is.
+      const closes = matching(tokens, k + 1);
+      if (closes === undefined || closes + 1 !== body.end) {
+        return { found: undefined, reasons: [at(source, call.start) + call.text
+          + " is one part of a larger returned expression, so the hook does not settle on it"] };
+      }
       return { found: { helper, local: call.text, completion, start: call.start }, reasons: [] };
     }
     return { found: undefined, reasons: [] };
@@ -558,6 +698,11 @@ function warmupCallIn(
       } else if (completion === undefined) {
         reasons.push(at(source, token.start) + token.text
           + " is neither awaited nor returned, so the hook finishes before the warm-up does");
+      } else if (body.parameters.includes(token.text)) {
+        reasons.push(shadowedByParameter(source, token));
+      } else if (completion === "return" && !returnsNothingElse(tokens, k, body)) {
+        reasons.push(at(source, token.start) + token.text
+          + " is one part of a larger returned expression, so the hook does not settle on it");
       } else {
         return { found: { helper, local: token.text, completion, start: token.start }, reasons: [] };
       }
@@ -567,6 +712,20 @@ function warmupCallIn(
     else if (token.kind === SyntaxKind.OpenBracketToken) brackets += 1;
   }
   return { found: undefined, reasons };
+}
+
+function shadowedByParameter(source: string, token: Token): string {
+  return at(source, token.start) + token.text
+    + " is a parameter of this callback, which shadows the import for the whole body";
+}
+
+/** Whether a returned call is the entire returned expression rather than one operand of it. */
+function returnsNothingElse(tokens: readonly Token[], call: number, body: CallbackBody): boolean {
+  const closes = matching(tokens, call + 1);
+  if (closes === undefined) return false;
+  if (closes + 1 === body.end) return true;
+  const after = tokens[closes + 1];
+  return after !== undefined && after.kind === SyntaxKind.SemicolonToken;
 }
 
 /** Index of the delimiter that closes the one at open, or undefined when the file is unbalanced. */
@@ -609,4 +768,3 @@ function lineOf(source: string, offset: number): number {
 function at(source: string, offset: number): string {
   return "line " + lineOf(source, offset) + ": ";
 }
-

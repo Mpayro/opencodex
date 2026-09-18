@@ -143,9 +143,16 @@ describe("cold-spawn warm-up coverage", () => {
       // The reason is half of it. The other half is that the file is still what the reason
       // describes: an unwarmed file may discuss the helper in prose, and may not bind it, because a
       // binding is the first thing a real warm-up needs and the last thing a stale note has.
+      // The import flag is checked as well as the bindings: a namespace import binds no name this
+      // judge follows, so bindings alone would read a real warm-up here as an absence.
       const report = judgeWarmup(path);
-      expect({ path, bindings: report.bindings, registrations: report.registrations, unreadable: report.unreadable })
-        .toEqual({ path, bindings: [], registrations: [], unreadable: [] });
+      expect({
+        path,
+        bindings: report.bindings,
+        imports: report.importsHelperModule,
+        registrations: report.registrations,
+        unreadable: report.unreadable,
+      }).toEqual({ path, bindings: [], imports: false, registrations: [], unreadable: [] });
     }
   });
 });
