@@ -62,7 +62,8 @@ export type GoogleWirePartKind =
  *
  * The message names one relationship — a function-call turn must follow a user turn or a
  * function-response turn — so call-turn-opens-request and call-turn-after-model-turn are the two
- * ways a request can contradict it, and response-turn-without-call-turn is its converse.
+ * ways a well-formed request can contradict it, call-turn-after-unknown-turn covers a predecessor
+ * that is neither, and response-turn-without-call-turn is its converse.
  * request-ends-with-model-turn is a different upstream 400 that messagesToGeminiFormat already
  * guards with its "(continue)" nudge; it is projected so a defeated guard is visible rather than
  * silent.
@@ -73,6 +74,7 @@ export type GoogleWirePartKind =
 export type GoogleWireOrderingViolation =
   | "call-turn-opens-request"
   | "call-turn-after-model-turn"
+  | "call-turn-after-unknown-turn"
   | "response-turn-without-call-turn"
   | "request-ends-with-model-turn";
 
@@ -107,10 +109,13 @@ export interface GoogleWireTurnShape {
 export interface GoogleWireShapeFacts {
   /** Which anchor class produced the Antigravity session id. Never the id itself. */
   sessionAnchor?: AntigravitySessionAnchor;
-  /** A thought-signature lookup returned a signature for at least one call. */
-  signatureLookupHit?: boolean;
-  /** The durable replay scope was complete enough to key a lookup. */
-  signatureScopeMatched?: boolean;
+  /**
+   * Function calls the translator signed from client history or the durable replay store,
+   * counted before the Antigravity session cache runs.
+   */
+  historySignedCalls?: number;
+  /** A durable replay scope was attached to this request. Its completeness is NOT asserted. */
+  replayScopeBound?: boolean;
   /** The real physical send this body belongs to, 1 for the first send. */
   sendOrdinal?: number;
   /** Bounded class of the upstream rejection, when this body was rejected. */
@@ -146,8 +151,18 @@ export type GoogleWireShapeSummary = {
     sentinelOnly: boolean;
     signedCalls: number;
     sentinelCalls: number;
-    lookupHit: boolean;
-    scopeMatched: boolean;
+    /** Signed at translation time, from client history or the durable replay store. */
+    historySignedCalls: number;
+    /**
+     * The remainder the Antigravity session cache supplied, clamped at zero. The cache never
+     * overwrites an existing signature, so the three counts partition the signed calls.
+     */
+    sessionCacheSignedCalls: number;
+    /**
+     * A durable replay scope was attached. Whether it was COMPLETE enough to key a lookup is
+     * decided inside lookupReplayThoughtSignature and is deliberately not claimed here.
+     */
+    replayScopeBound: boolean;
   };
   orderingViolations: number;
   firstOrderingViolation: { index: number; kind: GoogleWireOrderingViolation } | null;
@@ -229,7 +244,8 @@ interface TurnFacts {
 function violationFor(turn: TurnFacts, previous: TurnFacts | undefined, isLast: boolean): GoogleWireOrderingViolation | undefined {
   if (turn.role === "model" && turn.hasFunctionCall) {
     if (!previous) return "call-turn-opens-request";
-    if (previous.role !== "user") return "call-turn-after-model-turn";
+    if (previous.role === "model") return "call-turn-after-model-turn";
+    if (previous.role !== "user") return "call-turn-after-unknown-turn";
   }
   if (turn.role === "user" && turn.hasFunctionResponse) {
     if (!previous || previous.role !== "model" || !previous.hasFunctionCall) {
@@ -253,6 +269,7 @@ export function summarizeGoogleWireShape(
   const root = isRecord(body) ? body : {};
   const contents: unknown[] = Array.isArray(root.contents) ? root.contents : [];
   const ordinalFor = ordinalAllocator();
+  const historySignedCalls = Math.max(0, facts.historySignedCalls ?? 0);
 
   const roles: Record<GoogleWireTurnRole, number> = { user: 0, model: 0, other: 0 };
   const callOrdinals = new Set<number>();
@@ -372,8 +389,9 @@ export function summarizeGoogleWireShape(
       sentinelOnly: signedCalls > 0 && signedCalls === sentinelCalls,
       signedCalls,
       sentinelCalls,
-      lookupHit: facts.signatureLookupHit === true,
-      scopeMatched: facts.signatureScopeMatched === true,
+      historySignedCalls,
+      sessionCacheSignedCalls: Math.max(0, signedCalls - sentinelCalls - historySignedCalls),
+      replayScopeBound: facts.replayScopeBound === true,
     },
     orderingViolations,
     firstOrderingViolation,

@@ -998,10 +998,11 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         if (isDebugEnabled()) {
           debugProviderDiagnostic("google", "antigravity-wire-shape", summarizeGoogleWireShape(request, {
             sessionAnchor: antigravitySessionAnchor(parsed),
-            // A replayed call is one whose signature came from client history or the durable
-            // store; the Antigravity session cache signs later, inside applyAntigravityReplay.
-            signatureLookupHit: replayedCallIds.length > 0,
-            signatureScopeMatched: parsed._reasoningReplayScope !== undefined,
+            // Signed at translation time, from client history or the durable store. The
+            // Antigravity session cache signs afterwards, inside applyAntigravityReplay, and the
+            // projection attributes that remainder to the cache rather than to this count.
+            historySignedCalls: replayedCallIds.length,
+            replayScopeBound: parsed._reasoningReplayScope !== undefined,
           }));
         }
         const envelope = {

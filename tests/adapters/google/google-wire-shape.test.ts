@@ -235,6 +235,38 @@ describe("google wire shape projection describes structure", () => {
     expect(summary.firstOrderingViolation).toEqual({ index: 1, kind: "request-ends-with-model-turn" });
   });
 
+  test("a call turn after an unrecognized role is not blamed on a model turn", () => {
+    const summary = summarizeGoogleWireShape(compiledWireBody([
+      userTurn(),
+      { role: "function", parts: [{ text: WIRE_MARKERS.prompt }] },
+      modelCallTurn([callId(1)]),
+      toolResultTurn([callId(1)]),
+    ]));
+    expect(summary.roles).toEqual({ user: 2, model: 1, other: 1 });
+    expect(summary.firstOrderingViolation).toEqual({ index: 2, kind: "call-turn-after-unknown-turn" });
+  });
+
+  // The exhaustive leak oracle: every marker the fixtures plant, checked against one projection.
+  test("no marker the fixture plants survives into a summary", () => {
+    const summary = summarizeGoogleWireShape(
+      compiledWireBody([
+        userTurn(),
+        ...toolRoundTrip(1, { signature: WIRE_MARKERS.signature }),
+        ...toolRoundTrip(2),
+        modelCallTurn([callId(3)]),
+        toolResultTurn([callId(3)]),
+      ], { toolDeclarations: 4 }),
+      { sessionAnchor: "parent-and-own", historySignedCalls: 1, replayScopeBound: true, sendOrdinal: 1, errorClass: "turn-adjacency" },
+    );
+    const serialized = JSON.stringify(summary);
+    for (const marker of ALL_MARKERS) expect(serialized).not.toContain(marker);
+    // The projection is not vacuous: it did describe the request it refused to quote.
+    expect(summary.functionCalls).toBe(3);
+    expect(summary.toolDeclarations).toBe(4);
+    expect(summary.hasSessionId).toBe(true);
+    expect(summary.signature.present).toBe(true);
+  });
+
   test("an unanswered call and an id-less call are counted separately", () => {
     const summary = summarizeGoogleWireShape(compiledWireBody([
       userTurn(),
@@ -284,30 +316,50 @@ describe("google wire shape projection describes structure", () => {
     expect(compacted.turnShapes[1]).toEqual({ ...full.turnShapes[1]!, index: 1 });
   });
 
-  test("signature presence, sentinel-only signing and the caller's lookup facts stay separable", () => {
+  test("signature presence, sentinel-only signing and the two signing sources stay separable", () => {
     const unsigned = summarizeGoogleWireShape(compiledWireBody([userTurn(), ...toolRoundTrip(1)]));
     expect(unsigned.signature).toEqual({
-      present: false, sentinelOnly: false, signedCalls: 0, sentinelCalls: 0, lookupHit: false, scopeMatched: false,
+      present: false,
+      sentinelOnly: false,
+      signedCalls: 0,
+      sentinelCalls: 0,
+      historySignedCalls: 0,
+      sessionCacheSignedCalls: 0,
+      replayScopeBound: false,
     });
 
     const signed = summarizeGoogleWireShape(
       compiledWireBody([userTurn(), ...toolRoundTrip(1, { signature: WIRE_MARKERS.signature })]),
-      { signatureLookupHit: true, signatureScopeMatched: true },
+      { historySignedCalls: 1, replayScopeBound: true },
     );
     expect(signed.signature).toEqual({
-      present: true, sentinelOnly: false, signedCalls: 1, sentinelCalls: 0, lookupHit: true, scopeMatched: true,
+      present: true,
+      sentinelOnly: false,
+      signedCalls: 1,
+      sentinelCalls: 0,
+      historySignedCalls: 1,
+      sessionCacheSignedCalls: 0,
+      replayScopeBound: true,
     });
     expect(JSON.stringify(signed)).not.toContain(WIRE_MARKERS.signature);
+
+    // A signature the translator did not supply is attributed to the Antigravity session cache.
+    const fromCache = summarizeGoogleWireShape(
+      compiledWireBody([userTurn(), ...toolRoundTrip(1, { signature: WIRE_MARKERS.signature })]),
+      { historySignedCalls: 0, replayScopeBound: true },
+    );
+    expect(fromCache.signature.historySignedCalls).toBe(0);
+    expect(fromCache.signature.sessionCacheSignedCalls).toBe(1);
 
     // Sentinel-only is the shape a lookup miss reaches the wire as: signed, but by us.
     const sentinel = summarizeGoogleWireShape(
       compiledWireBody([userTurn(), ...toolRoundTrip(1, { signature: THOUGHT_SIGNATURE_SENTINEL })]),
-      { signatureLookupHit: false, signatureScopeMatched: true },
+      { historySignedCalls: 0, replayScopeBound: true },
     );
     expect(sentinel.signature.present).toBe(true);
     expect(sentinel.signature.sentinelOnly).toBe(true);
-    expect(sentinel.signature.lookupHit).toBe(false);
-    expect(sentinel.signature.scopeMatched).toBe(true);
+    expect(sentinel.signature.sessionCacheSignedCalls).toBe(0);
+    expect(sentinel.signature.replayScopeBound).toBe(true);
   });
 
   test("send facts are carried only when the caller has them", () => {
