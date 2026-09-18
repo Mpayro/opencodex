@@ -344,7 +344,6 @@ describe("openai-chat inline image normalization", () => {
     const adapter = createOpenAIChatAdapter(provider);
 
     const build = async (imageTierBias?: number) => {
-      resetNormalizeStateForTests();
       const built = adapter.buildRequest(parsedWith([imageMessage(urls)]), {
         headers: new Headers(),
         translatorBudget: createTestTranslatorBudget(),
@@ -357,7 +356,11 @@ describe("openai-chat inline image normalization", () => {
 
     // Two cold walks of the ladder over four megapixel images: this is the contract, and the
     // `execute` figure is what a disposition has to be argued against.
+    // The reset stays outside the measured segment: it zeroes the encode counter the ticks read,
+    // and a probe that drops to zero mid-phase reports movement that did not happen.
+    resetNormalizeStateForTests();
     const biased = await timing.phase("execute-biased", () => build(3));
+    resetNormalizeStateForTests();
     const unbiased = await timing.phase("execute-default", () => build());
     expect(biased).toBeLessThan(unbiased);
   });

@@ -50,11 +50,13 @@ const TICK_FIRST_MS = 1_000;
 const TICK_MAX_MS = 15_000;
 
 /**
- * A phase outliving this many ticks has said everything it can. The cap matters because a phase
- * killed by a test timeout never closes, so an uncapped chain would outlive its case and keep
- * writing into an unrelated part of the log.
+ * How long one phase may keep reporting. The bound matters because a phase killed by a test
+ * timeout never closes, and `unref` keeps the process from being held open without cancelling
+ * anything, so an unbounded chain would outlive its case and write into an unrelated part of the
+ * log. Two minutes is past every budget in #4997, the largest of which is 60s, and ends long
+ * before the job does.
  */
-const TICK_LIMIT = 40;
+const TICK_WINDOW_MS = 120_000;
 
 let envEmitted = false;
 let seq = 0;
@@ -135,17 +137,15 @@ export function phaseTimer(label: string, probe?: ProgressProbe): PhaseTimer {
     const openMs = (): string => (performance.now() - startedAt).toFixed(1);
     emit([...base, "phase=" + name, "state=start", "at=" + nowMs()]);
 
-    let ticks = 0;
     let gap = TICK_FIRST_MS;
     let seenAtLastTick = read();
     let handle: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
 
     const scheduleTick = (): void => {
-      if (closed || ticks >= TICK_LIMIT) return;
+      if (closed || performance.now() - startedAt >= TICK_WINDOW_MS) return;
       handle = setTimeout(() => {
         if (closed) return;
-        ticks += 1;
         const seen = read();
         const moved = seen !== seenAtLastTick;
         seenAtLastTick = seen;

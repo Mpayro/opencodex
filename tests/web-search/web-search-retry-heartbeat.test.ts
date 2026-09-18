@@ -64,14 +64,16 @@ afterEach(() => { globalThis.fetch = originalFetch; });
 
 describe("web-search same-target 429 retry", () => {
   test("retry wait longer than the stall budget still succeeds (heartbeats feed the watchdog)", async () => {
-    const timing = phaseTimer("web-search heartbeat retry");
+    // `sends` is the only externally visible progress this case makes, so it is what separates a
+    // backoff being served late by a loaded event loop from a loop that stopped advancing.
+    let sends = 0;
+    const timing = phaseTimer("web-search heartbeat retry", () => sends);
     timing.split("prepare");
     globalThis.fetch = (() => Promise.resolve(new Response(
       'event: response.completed\ndata: {"type":"response.completed"}\n\n',
       { headers: { "Content-Type": "text/event-stream" } },
     ))) as typeof fetch;
 
-    let sends = 0;
     const retryingAdapter: ProviderAdapter = {
       name: "mock-retry429",
       buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
@@ -89,22 +91,23 @@ describe("web-search same-target 429 retry", () => {
       async parseResponse() { throw new Error("parseResponse must be unreachable"); },
     };
 
-    // `sends` is the only externally visible progress this case makes, so it is what separates a
-    // backoff being served late from a loop that stopped advancing.
-    timing.split("execute");
-    const response = await runWithWebSearch({
-      parsed: parseRequest({ model: "routed/model", input: "hi", stream: true, tools: [{ type: "web_search" }] }),
-      adapter: retryingAdapter,
-      forwardProvider,
-      hostedTool: { type: "web_search" },
-      selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
-      maxSearches: 1,
-      stallTimeoutSec: 1,
-      retryOn429Policy: { enabled: true, attempts: 1, intervalMs: 1_500, maxIntervalMs: 60_000, respectRetryAfter: false },
-    });
-    const frames = await collectSse(response.body!);
+    // `phase` closes its segment through its own finally, so a throw inside the measured window
+    // still produces a closing line rather than a record that just stops.
     timing.end();
+    const frames = await timing.phase("execute", async () => {
+      const response = await runWithWebSearch({
+        parsed: parseRequest({ model: "routed/model", input: "hi", stream: true, tools: [{ type: "web_search" }] }),
+        adapter: retryingAdapter,
+        forwardProvider,
+        hostedTool: { type: "web_search" },
+        selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
+        settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
+        maxSearches: 1,
+        stallTimeoutSec: 1,
+        retryOn429Policy: { enabled: true, attempts: 1, intervalMs: 1_500, maxIntervalMs: 60_000, respectRetryAfter: false },
+      });
+      return collectSse(response.body!);
+    });
     // A 1.5s backoff under a 1s stall budget must not trip upstream_stall_timeout.
     expect(sends).toBe(2);
     expect(frames.find(f => f.event === "response.completed")).toBeDefined();

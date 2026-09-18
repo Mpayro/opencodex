@@ -126,8 +126,9 @@ describe("OpenAI provider-option integration spine", () => {
     // by 1.8s in another, and passes in the sharded lanes that run the same file, so the question
     // is which part grew rather than whether the whole is too slow. The segments separate fixture
     // setup, the server bind, the ownership assertions that are the actual contract, the migration
-    // child, and teardown including the reap.
-    const timing = phaseTimer("openai provider-option ownership spine");
+    // child, and teardown including the reap. `captures` counts upstream requests this case has
+    // observed, which is the monotonic signal that tells a slow transport apart from a stalled one.
+    const timing = phaseTimer("openai provider-option ownership spine", () => captures.length);
     timing.split("prepare");
     const root = mkdtempSync(join(tmpdir(), "ocx-provider-option-e2e-"));
     const opencodexHome = join(root, "opencodex");
@@ -358,6 +359,7 @@ describe("OpenAI provider-option integration spine", () => {
       expect(deriveModule.deriveProviderPresets().map(entry => entry.id)).not.toContain("openai-multi");
       expect(sidecar.listOpenAiForwardSidecarCandidates(config).map(row => row.providerName)).toEqual(["openai"]);
 
+      timing.split("server-start");
       server = serverModule.startServer(0);
       loopbackOrigin = new URL(server.url).origin;
       timing.split("execute");
