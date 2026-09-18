@@ -89,7 +89,7 @@ describe("google wire shape projection is inert", () => {
 
   test("provider debug changes neither the compiled request, the headers, nor the send count", async () => {
     const adapter = createGoogleAdapter(provider);
-    const request = parsedToolSession(4, { parent: "parent-a", own: "own-a" });
+    const request = parsedToolSession(4, { parent: "tp-9f31", own: "tc-4a02" });
     let fetchCalls = 0;
     const realFetch = globalThis.fetch;
     const realError = console.error;
@@ -125,11 +125,11 @@ describe("google wire shape projection is inert", () => {
     try {
       setDebugSettings({ debug: true });
       resetDebugLogBufferForTests();
-      await adapter.buildRequest(parsedToolSession(3, { parent: "parent-a", own: "own-a" }));
+      await adapter.buildRequest(parsedToolSession(3, { parent: "tp-9f31", own: "tc-4a02" }));
       const line = getDebugLogEntries().map(entry => entry.line).find(l => l.includes("antigravity-wire-shape"));
       expect(line).toBeDefined();
       const emitted = line as string;
-      for (const secret of ["opening turn", "next turn", "search", "call-1", "call-2", "proj-123", "ya29.token", THOUGHT_SIGNATURE_SENTINEL, "parent-a", "own-a"]) {
+      for (const secret of ["opening turn", "next turn", "search", "call-1", "call-2", "proj-123", "ya29.token", THOUGHT_SIGNATURE_SENTINEL, "tp-9f31", "tc-4a02"]) {
         expect(emitted).not.toContain(secret);
       }
       expect(emitted).toContain("\"sessionAnchor\":\"parent-and-own\"");
@@ -142,7 +142,7 @@ describe("google wire shape projection is inert", () => {
     const adapter = createGoogleAdapter(provider);
     setDebugSettings({ debug: false });
     resetDebugLogBufferForTests();
-    await adapter.buildRequest(parsedToolSession(3, { parent: "parent-a", own: "own-a" }));
+    await adapter.buildRequest(parsedToolSession(3, { parent: "tp-9f31", own: "tc-4a02" }));
     expect(getDebugLogEntries()).toEqual([]);
   });
 });
