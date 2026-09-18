@@ -14,9 +14,12 @@
 // This migration is deliberately NOT general reconciliation. It rewrites exactly
 // one thing: an id this file declares retired, on a provider that still carries
 // the registry's transport, and only when the registry currently seeds the
-// replacement. Everything else in the row is left alone.
+// replacement — and only in the fields the registry does not itself republish
+// keyed by that retired id (see `registrySeededFields`, issue #5066). Everything
+// else in the row is left alone.
 
 import { PROVIDER_REGISTRY } from "./registry";
+import { providerConfigSeed } from "./derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 export interface ModelRename {
@@ -194,6 +197,45 @@ function registrySeedsTarget(rename: ModelRename): boolean {
   return !!entry?.models?.includes(rename.to);
 }
 
+/**
+ * The mirror guard: fields whose saved value the registry writes back with the retired id in it.
+ *
+ * `providerConfigSeed` is what both the OAuth preset (`deriveOAuthProviderConfig`) and
+ * `enrichProviderFromRegistry` contribute to a saved row. A field it publishes keyed by the
+ * retired id is therefore registry metadata that arrives in the config again on its own — not a
+ * stale user selection this migration can repair.
+ *
+ * Rewriting such a field is worse than a no-op, because it never converges. `startServer` runs
+ * this migration and then `reconcileOAuthProviders`, and `applyOAuthPresetCatalog` copies the
+ * preset's record over the saved one whenever the two differ. The rename is undone inside the
+ * same boot, the config is written twice, and the user is told about a rename that never sticks
+ * on every single start. Issue #5066 is exactly this loop: `ANTIGRAVITY_MODEL_CONTEXT_WINDOWS`
+ * derives a window for each alias, which gives `modelContextWindows` a key for all nine retired
+ * Flash ids — the nine `[model-rename-migration]` lines the reporter saw on every `ocx start`,
+ * none of which required them to have selected any of those nine models.
+ *
+ * Those registry entries are deliberate and stay: a request that still names `gemini-3.6-flash`
+ * routes to 3.7 and needs a context window under the id it was asked for
+ * (`tests/adapters/google/gemini-37-flash-migration.test.ts` pins that). So the contradiction is
+ * resolved on this side, where nothing is lost — the migration keeps repairing every field the
+ * user owns, and leaves the registry to own the metadata it republishes anyway.
+ */
+function registrySeededFields(rename: ModelRename): ReadonlySet<string> {
+  const seeded = new Set<string>();
+  const entry = PROVIDER_REGISTRY.find(row => row.id === rename.provider);
+  if (!entry) return seeded;
+  const seed = providerConfigSeed(entry) as unknown as Record<string, unknown>;
+  for (const field of [...MODEL_ID_LISTS, ...MODEL_KEYED_RECORDS] as readonly string[]) {
+    const value = seed[field];
+    if (Array.isArray(value)) {
+      if (value.includes(rename.from)) seeded.add(field);
+      continue;
+    }
+    if (value && typeof value === "object" && rename.from in value) seeded.add(field);
+  }
+  return seeded;
+}
+
 export interface ModelRenameProjection {
   config: OcxConfig;
   changed: boolean;
@@ -226,14 +268,17 @@ export function projectModelRenames(
     // Provider config is a closed interface, so index through one unknown-cast
     // view rather than casting at each assignment.
     const row = prov as unknown as Record<string, unknown>;
+    const registrySeeded = registrySeededFields(rename);
     let touched = false;
     for (const field of MODEL_ID_LISTS) {
+      if (registrySeeded.has(field)) continue;
       const next = renameInList(row[field], rename.from, rename.to);
       if (!next) continue;
       row[field] = next;
       touched = true;
     }
     for (const field of MODEL_KEYED_RECORDS) {
+      if (registrySeeded.has(field)) continue;
       const next = rename.dropReasoningEffortMap && field === "modelReasoningEffortMap"
         ? dropFromRecord(row[field], rename.from)
         : renameInRecord(row[field], rename.from, rename.to);
