@@ -17,6 +17,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
 import { watchdogMs } from "../../helpers/ci-watchdog";
+import { phaseTimer } from "../../helpers/phase-timing";
 import { removeTreeWithRetry } from "../../helpers/remove-tree";
 import { repoPath } from "../../helpers/repo-root";
 type Capture = {
@@ -121,6 +122,13 @@ function responsesLifecycle(body: Record<string, unknown>): string {
 
 describe("OpenAI provider-option integration spine", () => {
   test("keeps Pool, Direct, and API ownership stable across transports and management", async () => {
+    // Instrumented for #4997. This case missed its own 30s bound by 29ms in one control run and
+    // by 1.8s in another, and passes in the sharded lanes that run the same file, so the question
+    // is which part grew rather than whether the whole is too slow. The segments separate fixture
+    // setup, the server bind, the ownership assertions that are the actual contract, the migration
+    // child, and teardown including the reap.
+    const timing = phaseTimer("openai provider-option ownership spine");
+    timing.split("prepare");
     const root = mkdtempSync(join(tmpdir(), "ocx-provider-option-e2e-"));
     const opencodexHome = join(root, "opencodex");
     const codexHome = join(root, "codex");
@@ -352,6 +360,7 @@ describe("OpenAI provider-option integration spine", () => {
 
       server = serverModule.startServer(0);
       loopbackOrigin = new URL(server.url).origin;
+      timing.split("execute");
       const local = (path: string, init?: RequestInit) => fetch(new URL(path, server!.url), init);
       const post = (path: string, body: unknown, headers: HeadersInit = {}) => local(path, {
         method: "POST",
@@ -574,6 +583,7 @@ describe("OpenAI provider-option integration spine", () => {
       ]) expect(usageLines.some(row => Object.entries(expected).every(([key, value]) => row[key] === value))).toBe(true);
 
       const migrationRoot = mkdtempSync(join(tmpdir(), "ocx-provider-option-migration-"));
+      timing.split("migration-child");
       try {
         const child = Bun.spawn([
           process.execPath,
@@ -623,6 +633,7 @@ describe("OpenAI provider-option integration spine", () => {
       } finally {
         removeTreeWithRetry(migrationRoot);
       }
+      timing.split("execute-tail");
 
       expect(new Set(blockedUpstreamWebSocketUrls)).toEqual(new Set([
         "wss://chatgpt.com/backend-api/codex/responses",
@@ -651,6 +662,7 @@ describe("OpenAI provider-option integration spine", () => {
         }, null, 2) + "\n", { mode: 0o600 });
       }
     } finally {
+      timing.split("teardown");
       try {
         if (server) await server.stop(true);
       } finally {
@@ -663,6 +675,7 @@ describe("OpenAI provider-option integration spine", () => {
         removeTreeWithRetry(root);
         expect(hashTree(realClaudeDir)).toBe(realClaudeHashBefore);
       }
+      timing.end();
     }
   }, 30_000);
 });
