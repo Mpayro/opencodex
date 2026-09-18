@@ -1071,11 +1071,17 @@ describe("bun test user lock", () => {
   // it always reaches its own teardown — releasing the lock and confirming its children
   // were reaped — instead of being terminated inside a spawn with the lock still held.
   // The spawnSync timeout stays the backstop for a controller that ignores its deadline.
+  //
+  // The nominal per-child timeout is declared here rather than inside the helper, so the
+  // deadline that bounds four cold Bun starts stays with the case that owns them and
+  // tests/ci-workflows/cold-spawn-warmup.test.ts keeps seeing this file. The controller
+  // narrows it to whatever its own deadline still allows.
   test.if(process.platform === "win32")(
     "a nested Windows Bun test inherits the live lock its controller holds and refuses an incomplete capability",
     () => {
       const root = mkdtempSync(join(tmpdir(), "opencodex-nested-lock-"));
       const controllerBudgetMs = SPAWN_BUDGET_MS - 10_000;
+      const childSpawn = { timeout: INTERNAL_DEADLINE_MS };
       const environmentBefore = JSON.stringify({
         noQueue: process.env[TEST_RUN_NO_QUEUE_ENV],
         runId: process.env[TEST_RUN_ID_ENV],
@@ -1094,6 +1100,7 @@ describe("bun test user lock", () => {
             helperPath("nested-test-run-lock-controller.ts"),
             root,
             String(Date.now() + controllerBudgetMs),
+            JSON.stringify(childSpawn),
           ],
           { cwd: root, env: controllerEnv, encoding: "utf8", timeout: SPAWN_BUDGET_MS },
         );

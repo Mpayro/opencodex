@@ -21,10 +21,11 @@
  * OUTSIDE the repository so Bun loads no bunfig preload into the holder itself; a
  * preloaded controller would take the same lock in tests/preload.ts and then wait on
  * itself. It must be handed a temporary root it may write into, because every fixture it
- * generates and the foreign-owner probe it plants live there. And it must be handed a
- * deadline: every child it spawns is bounded by what is left of that deadline minus a
- * cleanup reserve, so the controller always reaches its own teardown rather than being
- * killed inside a spawn with the lock still held.
+ * generates and the foreign-owner probe it plants live there. And it must be handed both
+ * a deadline and the caller's spawn options: the nominal per-child timeout belongs to the
+ * case that owns these children, and the controller only narrows it to what is left of
+ * the deadline minus a cleanup reserve, so the controller always reaches its own teardown
+ * rather than being killed inside a spawn with the lock still held.
  *
  * Everything below runs only as an entry point. The test file imports the receipt key
  * from here, and an import must not acquire a lock or spawn anything.
@@ -68,7 +69,6 @@ const CHILD_MARKER = '{"nestedLockReceipt":';
 const CHILD_RECEIPT_KEYS = ["samePath", "sameRun", "sameToken", "member", "preloadRan", "guardArmed"] as const;
 /** Healthy, missing token, foreign token, foreign path. A short count means one was skipped. */
 const EXPECTED_CHILD_SPAWNS = 4;
-const CHILD_DEADLINE_MS = 15_000;
 const ACQUIRE_POLL_MS = 250;
 const ACQUIRE_MAX_WAIT_MS = 10_000;
 const FOREIGN_POLL_MS = 100;
@@ -85,7 +85,15 @@ const MINIMUM_CHILD_ALLOWANCE_MS = 1_000;
  */
 const uuidPattern = (): RegExp => /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
-async function runNestedLiveLockController(tempRoot: string | undefined, deadlineAt: number): Promise<void> {
+interface ChildSpawnOptions {
+  timeout: number;
+}
+
+async function runNestedLiveLockController(
+  tempRoot: string | undefined,
+  deadlineAt: number,
+  childSpawn: ChildSpawnOptions | undefined,
+): Promise<void> {
   const receipt: NestedLiveLockReceipt = {
     lockHeld: false,
     healthyChildExited: false,
@@ -117,6 +125,9 @@ async function runNestedLiveLockController(tempRoot: string | undefined, deadlin
     if (process.platform !== "win32") throw new Error("the nested live-lock controller is Windows-only");
     if (!tempRoot) throw new Error("the nested live-lock controller needs a temporary root argument");
     if (!Number.isFinite(deadlineAt)) throw new Error("the nested live-lock controller needs a deadline argument");
+    if (!childSpawn || !Number.isFinite(childSpawn.timeout) || childSpawn.timeout <= 0) {
+      throw new Error("the nested live-lock controller needs the caller's child spawn options");
+    }
     if (process.env[TEST_RUN_NO_QUEUE_ENV] !== undefined) {
       throw new Error("the controller environment must have the no-queue opt-out removed");
     }
@@ -191,7 +202,7 @@ async function runNestedLiveLockController(tempRoot: string | undefined, deadlin
 
     const args = ["test", "--preload", repoPath("tests", "preload.ts"), fixture];
     const runChild = (label: string, mutate?: (env: NodeJS.ProcessEnv) => void): SpawnSyncReturns<string> => {
-      const allowance = Math.min(CHILD_DEADLINE_MS, budgetLeftMs());
+      const allowance = Math.min(childSpawn.timeout, budgetLeftMs());
       if (allowance < MINIMUM_CHILD_ALLOWANCE_MS) {
         throw new Error("the controller ran out of budget before spawning " + label);
       }
@@ -324,5 +335,8 @@ async function runNestedLiveLockController(tempRoot: string | undefined, deadlin
 }
 
 if (import.meta.main) {
-  await runNestedLiveLockController(process.argv[2], Number(process.argv[3]));
+  const spawnOptions = process.argv[4]
+    ? JSON.parse(process.argv[4]) as ChildSpawnOptions
+    : undefined;
+  await runNestedLiveLockController(process.argv[2], Number(process.argv[3]), spawnOptions);
 }
