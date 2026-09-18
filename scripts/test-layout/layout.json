@@ -778,6 +778,7 @@
     "google-vertex-stream.test.ts": "adapters/google",
     "google-vertex-thought-signature.test.ts": "adapters/google",
     "google-wire-compiler.test.ts": "adapters/google",
+    "google-wire-shape.test.ts": "adapters/google",
     "grok-attribution.test.ts": "providers/xai",
     "grok-config-inject.test.ts": "providers/xai",
     "grok-effort-inject.test.ts": "providers/xai",

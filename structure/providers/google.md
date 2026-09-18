@@ -72,3 +72,26 @@ a claim about what the upstream can do); an image-capable model, whose `response
 configuration contradicts JSON-constrained text; and a `json_schema` format carrying
 no schema, which would otherwise downgrade to bare JSON mode. An image-capable model
 with no structured-output request keeps its existing `responseModalities` behavior.
+
+## Google wire-shape projection
+
+`src/adapters/google-wire-shape.ts` describes a compiled Google request without carrying any of
+it. `summarizeGoogleWireShape` reads the body after `compileGoogleWireBody` and after Antigravity
+replay and signature adjustment, which is the object the envelope sends, and returns per-role turn
+counts, function call and response counts and their pairing, the position and class of the first
+ordering violation, signature presence and sentinel-only signing, the session anchor class, and a
+bounded upstream error class. Tool-call identity survives only as a request-internal ordinal in
+first-appearance order.
+
+What it must never retain is the point of the module: prompt or system text, tool arguments and
+results, tool and function names, original or wire call ids, signature text or any hash of it,
+inline file bytes, project and account identifiers, the request id, the Cloud Code Assist session
+id, Codex thread and session ids, and the first user message. Totals stay exact for the whole
+request while per-turn detail stops at a fixed ceiling and sets `truncated`, so a long agentic
+session still reports its real counts.
+
+It is a projection, not a validator. Nothing in the request path consults its output, and the
+provider-debug gate sits at the call site so a request pays nothing for the walk while debug is
+off. `antigravitySessionAnchor` in `google-antigravity-wire.ts` is the matching content-free read
+of the session boundary: it reports which of the four anchor classes produced the session id
+without reporting the id.
