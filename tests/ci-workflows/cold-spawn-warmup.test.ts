@@ -11,9 +11,14 @@ import {
 } from "../helpers/cold-spawn-warmup";
 import { repoPath, repoRoot } from "../helpers/repo-root";
 import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
+import {
+  analyzeWarmupRegistration,
+  warmupIsRegistered,
+  warmupRegistrationComplaints,
+} from "../helpers/warmup-registration";
 
 /**
- * Two things are checked here, and they answer different questions.
+ * Three things are checked here, and they answer different questions.
  *
  * The scan answers "did anyone add another one". A test that hands `INTERNAL_DEADLINE_MS` to a child
  * process timeout is measuring that child's cold module-graph load inside the assertion, which is
@@ -21,6 +26,15 @@ import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
  * longer than the next, so the verdict depends on what else ran in the shard. Every such file has to
  * appear below with a disposition, so the next one is classified when it lands rather than after it
  * fails on a Windows shard.
+ *
+ * The dispositions answer "is the file recorded as warmed still warmed". That used to be a
+ * substring test for the helper's path, which #5060 showed accepts an unused import, a comment or a
+ * string literal as proof — each of them survives deleting the beforeAll call that did the work, so
+ * the measured child pays the cold load again with a green guard in front of it.
+ * tests/helpers/warmup-registration.ts replaces the substring with a structural judge over the
+ * file's tokens, and its own regression set is tests/ci-workflows/warmup-registration.test.ts. It
+ * reads shape, not execution: the execution oracle is the [cold-spawn-warmup] completion line the
+ * helper prints on every hosted run.
  *
  * The unit tests answer "does the warm-up still warm the right thing". A warm-up that names its
  * modules by hand decays silently, so `moduleGraphSpecifiers` derives them from the child's own
@@ -99,24 +113,39 @@ function filesBoundingASpawnWithTheDeadline(): string[] {
     .sort();
 }
 
+function judgeWarmup(path: string) {
+  const file = repoPath(path);
+  return analyzeWarmupRegistration(file, readFileSync(file, "utf8"));
+}
+
 describe("cold-spawn warm-up coverage", () => {
   test("every file that times a spawned child against the deadline has a disposition", () => {
     expect(filesBoundingASpawnWithTheDeadline()).toEqual(Object.keys(DISPOSITIONS).sort());
   });
 
-  test("a file recorded as warmed consumes the shared warm-up", () => {
-    const missing = Object.entries(DISPOSITIONS)
+  test("a file recorded as warmed registers the warm-up and waits for it", () => {
+    // The bar is a bun:test beforeAll that calls a binding imported from the helper module and
+    // awaits or returns what it gives back. A mention of the helper's path is not evidence of any
+    // of those, which is what #5060 was: the substring check this replaced stayed green through the
+    // deletion of the call it was supposed to be watching.
+    const unproven = Object.entries(DISPOSITIONS)
       .filter(([, disposition]) => disposition.warmed)
-      .filter(([path]) => !readFileSync(repoPath(path), "utf8").includes("helpers/cold-spawn-warmup"))
-      .map(([path]) => path);
-    expect(missing).toEqual([]);
+      .map(([path]) => ({ path, report: judgeWarmup(path) }))
+      .filter(entry => !warmupIsRegistered(entry.report))
+      .map(entry => entry.path + ": " + warmupRegistrationComplaints(entry.report).join(" | "));
+    expect(unproven).toEqual([]);
   });
 
   test("a file recorded as unwarmed says why, and does not quietly become warmed", () => {
     for (const [path, disposition] of Object.entries(DISPOSITIONS)) {
       if (disposition.warmed) continue;
       expect(disposition.why.length).toBeGreaterThan(80);
-      expect(readFileSync(repoPath(path), "utf8")).not.toInclude("helpers/cold-spawn-warmup");
+      // The reason is half of it. The other half is that the file is still what the reason
+      // describes: an unwarmed file may discuss the helper in prose, and may not bind it, because a
+      // binding is the first thing a real warm-up needs and the last thing a stale note has.
+      const report = judgeWarmup(path);
+      expect({ path, bindings: report.bindings, registrations: report.registrations, unreadable: report.unreadable })
+        .toEqual({ path, bindings: [], registrations: [], unreadable: [] });
     }
   });
 });
