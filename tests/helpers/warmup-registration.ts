@@ -227,6 +227,34 @@ const CAN_END_STATEMENT: ReadonlySet<SyntaxKind> = new Set([
 ]);
 
 /**
+ * Tokens a statement can begin with. A line break only ends a statement when the next line cannot
+ * continue the previous expression, so a line opening with a paren, a bracket, a template or an
+ * operator keeps the statement it is part of - the classic hazard automatic semicolon insertion
+ * leaves behind. Anything missing from this set only keeps a conditional in force for longer,
+ * which refuses a registration rather than accepting one.
+ */
+const CAN_START_STATEMENT: ReadonlySet<SyntaxKind> = new Set([
+  SyntaxKind.Identifier,
+  SyntaxKind.OpenBraceToken,
+  SyntaxKind.SemicolonToken,
+  SyntaxKind.ConstKeyword,
+  SyntaxKind.LetKeyword,
+  SyntaxKind.VarKeyword,
+  SyntaxKind.FunctionKeyword,
+  SyntaxKind.ClassKeyword,
+  SyntaxKind.AsyncKeyword,
+  SyntaxKind.IfKeyword,
+  SyntaxKind.ForKeyword,
+  SyntaxKind.WhileKeyword,
+  SyntaxKind.SwitchKeyword,
+  SyntaxKind.TryKeyword,
+  SyntaxKind.ReturnKeyword,
+  SyntaxKind.ThrowKeyword,
+  SyntaxKind.ImportKeyword,
+  SyntaxKind.ExportKeyword,
+]);
+
+/**
  * The only call a registration may sit inside. A hook registered in an uncalled helper function,
  * in a test body, or in an immediately-invoked function is not a hook the file is known to run, and
  * bun:test registers per describe scope, so describe is the whole allowed set.
@@ -314,6 +342,7 @@ export function analyzeWarmupRegistration(fileName: string, source: string): War
     const atStatementLevel = callStack.length === (frame === undefined ? 0 : frame.parenDepth);
     const previousToken = tokens[i - 1];
     if (atStatementLevel && token.newline && i !== consequentStart
+      && CAN_START_STATEMENT.has(token.kind)
       && previousToken !== undefined && CAN_END_STATEMENT.has(previousToken.kind)) {
       statementConditional = false;
     }

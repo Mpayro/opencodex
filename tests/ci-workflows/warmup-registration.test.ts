@@ -222,6 +222,19 @@ describe("warm-up judge: the hook registration", () => {
     expect(warmupIsRegistered(report)).toBe(true);
     expect(warmupRegistrationComplaints(report).join(" ")).toContain("cannot see it run");
   });
+
+  test("a line that continues the guarded expression is still the guarded statement", () => {
+    // The second line opens with a paren, so there is no automatic semicolon between them: this is
+    // one conditional consequent and neither hook runs. A statement boundary drawn on the line
+    // break alone would read the second one as unconditional and accept the file.
+    const report = judge(
+      BUN_TEST,
+      HELPER,
+      "if (false) beforeAll(() => warmModuleGraph(options))",
+      "(beforeAll(async () => { await warmModuleGraph(options); }))",
+    );
+    expect(warmupIsRegistered(report)).toBe(false);
+  });
 });
 
 describe("warm-up judge: call ownership", () => {
